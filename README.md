@@ -1,6 +1,6 @@
-[![Rank](https://make.fun/badges/xenopatijaya/gta6-trophy-guide-01-v6/rank.svg)](https://make.fun/xenopatijaya/gta6-trophy-guide-01-v6)
-[![Reward](https://make.fun/badges/xenopatijaya/gta6-trophy-guide-01-v6/reward.svg)](https://make.fun/xenopatijaya/gta6-trophy-guide-01-v6)
-[![Competition](https://make.fun/badges/xenopatijaya/gta6-trophy-guide-01-v6/competition.svg)](https://make.fun/xenopatijaya/gta6-trophy-guide-01-v6)
+[![make.fun · gta6-trophy-guide-01](https://make.fun/badge/gta6-trophy-guide-01.svg)](https://make.fun/bounty/gta6-trophy-guide-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-guide-01)
+[![rank](https://make.fun/badge/gta6-trophy-guide-01/xenopatijaya/gta6-trophy-guide-01-v6/rank.svg)](https://make.fun/bounty/gta6-trophy-guide-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-guide-01)
+[![reward](https://make.fun/badge/gta6-trophy-guide-01/xenopatijaya/gta6-trophy-guide-01-v6/reward.svg)](https://make.fun/bounty/gta6-trophy-guide-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-trophy-guide-01)
 
 # Leonida Atlas — GTA VI Trophy Guide & Tracker
 
