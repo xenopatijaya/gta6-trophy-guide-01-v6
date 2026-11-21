@@ -1,51 +1,87 @@
-// Leonida Atlas v6 — Next Up queue and session planner.
-// The queue is deterministic: the possibly missable trophy first, then
-// unearned trophies in roadmap-stage order, then by list order. A trophy
-// is "gated" when an earlier stage still has unearned trophies, so the
-// queue is also the earliest-ungated list the right rail shows.
+// Leonida Atlas — planner maths.
+// Pure helpers shared by the planner view and the header summary:
+// what is left, how long it should take, and which trophies come next
+// when the roadmap order is respected.
 
-export function nextUpQueue(trophies, earnedIds) {
-  const earned = new Set(earnedIds);
-  const remaining = trophies.filter((t) => !earned.has(t.id) && t.grade !== 'platinum');
-  const missable = remaining.filter((t) => t.flag === 'missable');
-  const rest = remaining.filter((t) => t.flag !== 'missable');
-  rest.sort((a, b) => a.stage - b.stage || a.id - b.id);
-  const lowestStage = rest.length ? rest[0].stage : null;
-  return [...missable, ...rest].map((t) => ({
-    trophy: t,
-    gated: t.flag !== 'missable' && lowestStage !== null && t.stage > lowestStage,
-  }));
+function isEarned(progress, trophy) {
+  return progress.earned[trophy.id] === true;
 }
 
-export function sessionPlan(queue, hoursAvailable) {
-  // Fill the session greedily in queue order. The first pick is always
-  // included even if it alone overruns the budget (starting the missable
-  // or the current stage beats an empty plan); later picks must fit the
-  // time left, and smaller trophies may fill the tail.
-  const picks = [];
-  let used = 0;
-  for (const item of queue) {
-    if (item.gated && picks.length > 0) continue;
-    const cost = Math.max(0.5, item.trophy.hours || 1);
-    if (picks.length === 0 || used + cost <= hoursAvailable) {
-      picks.push(item);
-      used += cost;
-    }
-    if (used >= hoursAvailable) break;
+function stepsTicked(progress, trophy) {
+  let n = 0;
+  for (let i = 0; i < trophy.steps.length; i++) {
+    if (progress.stepsDone[trophy.id + ":" + i]) n++;
   }
-  return { picks, used };
+  return n;
 }
 
-export function platinumEta(stages, trophies, earnedIds) {
-  // Remaining hours: each stage's estimate scaled by the share of its
-  // trophies still unearned, summed across stages.
-  const earned = new Set(earnedIds);
-  let total = 0;
-  for (const stage of stages) {
-    const inStage = trophies.filter((t) => t.stage === stage.n);
-    if (!inStage.length) continue;
-    const left = inStage.filter((t) => !earned.has(t.id)).length;
-    total += stage.hours * (left / inStage.length);
+function totalStepsTicked(progress, trophies) {
+  let n = 0;
+  for (const t of trophies) n += stepsTicked(progress, t);
+  return n;
+}
+
+function earnedByGrade(progress, trophies) {
+  const tally = { platinum: 0, gold: 0, silver: 0, bronze: 0 };
+  for (const t of trophies) if (isEarned(progress, t)) tally[t.grade]++;
+  return tally;
+}
+
+// Roadmap order = stage first, then position inside the stage as the
+// data lists it (ids already follow the intended play order).
+function roadmapSequence(trophies) {
+  return [...trophies].sort((a, b) => (a.stage - b.stage) || (a.id - b.id));
+}
+
+function nextUp(progress, trophies, limit) {
+  // The possibly-missable trophy always leads — it is the one entry
+  // that cannot wait — then plain roadmap order (stage, then listing
+  // position) for everything else.
+  return [...trophies]
+    .filter((t) => !isEarned(progress, t))
+    .sort((a, b) =>
+      ((a.flag === "missable" ? 0 : 1) - (b.flag === "missable" ? 0 : 1)) ||
+      (a.stage - b.stage) || (a.id - b.id))
+    .slice(0, limit);
+}
+
+// Hours still on the table: a trophy's listed hours count in full until
+// it is earned; counters shave off the share already logged.
+function hoursRemaining(progress, trophy) {
+  if (isEarned(progress, trophy)) return 0;
+  if (typeof trophy.count === "number" && trophy.count > 0) {
+    const done = Math.min(progress.counters[trophy.id] || 0, trophy.count);
+    return trophy.hours * (1 - done / trophy.count);
   }
-  return Math.round(total);
+  return trophy.hours;
+}
+
+function planSummary(progress, trophies) {
+  const chosen = progress.plan
+    .map((id) => trophies.find((t) => t.id === id))
+    .filter(Boolean);
+  let hours = 0;
+  let open = 0;
+  for (const t of chosen) {
+    hours += hoursRemaining(progress, t);
+    if (!isEarned(progress, t)) open++;
+  }
+  return { chosen, hours, open };
+}
+
+function platinumSummary(progress, trophies, stages) {
+  const totalHours = stages.reduce((sum, s) => sum + s.hours, 0);
+  let remaining = 0;
+  for (const t of trophies) remaining += hoursRemaining(progress, t);
+  const earnedCount = trophies.filter((t) => isEarned(progress, t)).length;
+  return { totalHours, remaining, earnedCount, total: trophies.length };
+}
+
+// Missable ordering: the possibly-missable trophy first, then watch and
+// unconfirmed entries by earliest roadmap stage (their last chance).
+function watchOrder(trophies) {
+  const rank = { missable: 0, watch: 1, unconfirmed: 2 };
+  return trophies
+    .filter((t) => t.flag !== "none")
+    .sort((a, b) => (rank[a.flag] - rank[b.flag]) || (a.stage - b.stage) || (a.id - b.id));
 }

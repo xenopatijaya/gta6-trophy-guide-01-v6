@@ -1,154 +1,44 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Leonida Atlas v6 — GTA VI Trophy Guide, Every Step Cited</title>
-<meta name="description" content="Offline GTA VI trophy atlas: all 55 PS5 trophies with a cited guide for every atomic step, per-page sources, a claims matrix, disputes shown both ways, an audit strip, a roadmap, a session planner and per-step progress.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230e2a30'/%3E%3Ctext x='32' y='45' font-size='34' font-family='Georgia,serif' font-weight='bold' text-anchor='middle' fill='%23f2b544'%3EA%3C/text%3E%3C/svg%3E">
+<title>Leonida Atlas — GTA VI Trophy Guide &amp; Tracker</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="masthead">
-  <div class="brand">
-    <div class="seal" aria-hidden="true">A</div>
-    <div>
-      <h1>Leonida Atlas <span class="vtag">v6</span></h1>
-      <p class="tagline">GTA VI &middot; PS5 trophy guide &amp; tracker &middot; every guide step cited</p>
+  <div class="masthead-inner">
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <div>
+        <h1>Leonida Atlas <span class="version-tag">v6</span></h1>
+        <p class="tagline">GTA VI · PS5 trophy guide &amp; tracker · every guide step cited</p>
+      </div>
     </div>
+    <div class="masthead-progress" id="masthead-progress"></div>
   </div>
-  <div class="headline-progress" aria-live="polite">
-    <div class="hp-num"><span id="earnedCount">0</span><span class="hp-of"> / 55 earned</span></div>
-    <div class="hp-bar"><div class="hp-fill" id="progressFill"></div></div>
-    <div class="hp-grades" id="gradeBreakdown"></div>
-    <div class="hp-coll" id="collectiblesLogged"></div>
-  </div>
+  <div class="audit-strip" id="audit-strip"></div>
 </header>
 
-<section class="audit" id="auditStrip" aria-label="Audit strip"></section>
-
-<nav class="tabs" id="tabBar" aria-label="Views">
-  <button type="button" data-view="ledger" class="active">Ledger / Checklist</button>
-  <button type="button" data-view="roadmap">Roadmap</button>
-  <button type="button" data-view="missables">Missables &amp; watch</button>
-  <button type="button" data-view="planner">Next up / Planner</button>
-  <button type="button" data-view="matrix">Source matrix</button>
-  <button type="button" data-view="sources">Sources &amp; disputes</button>
+<nav class="view-tabs" id="view-tabs">
+  <button data-view="ledger" class="tab is-active">Ledger / Checklist</button>
+  <button data-view="roadmap" class="tab">Roadmap</button>
+  <button data-view="missables" class="tab">Missables &amp; watch</button>
+  <button data-view="planner" class="tab">Next up / Planner</button>
+  <button data-view="matrix" class="tab">Source matrix</button>
+  <button data-view="sources" class="tab">Sources &amp; disputes</button>
 </nav>
 
-<section class="toolbar" id="toolbar">
-  <label class="search">Search
-    <input id="searchBox" type="search" placeholder="Name, description, guide text…" autocomplete="off">
-  </label>
-  <div class="chips" id="kindChips" role="group" aria-label="Filter by kind"></div>
-  <label>Grade
-    <select id="gradeSelect">
-      <option value="all">All grades</option>
-      <option value="platinum">Platinum</option>
-      <option value="gold">Gold</option>
-      <option value="silver">Silver</option>
-      <option value="bronze">Bronze</option>
-    </select>
-  </label>
-  <label>Stage
-    <select id="stageSelect">
-      <option value="all">All stages</option>
-      <option value="1">1 · Story</option>
-      <option value="2">2 · Side stories</option>
-      <option value="3">3 · Activities</option>
-      <option value="4">4 · Collectibles</option>
-      <option value="5">5 · Robberies</option>
-      <option value="6">6 · 100%</option>
-    </select>
-  </label>
-  <label class="check"><input id="earnedOnly" type="checkbox"> Earned only</label>
-  <label class="check"><input id="spoilerToggle" type="checkbox" checked> Spoiler-safe</label>
-  <div class="actions">
-    <button id="exportBtn" type="button">Export</button>
-    <button id="importBtn" type="button">Import</button>
-    <input id="importFile" type="file" accept="application/json,.json" hidden>
-    <button id="resetBtn" type="button" class="danger">Reset</button>
-  </div>
-</section>
+<main id="app" class="app-shell"></main>
 
-<main>
-  <section class="view" id="view-ledger">
-    <div class="columns">
-      <div class="listcol">
-        <p class="countline" id="countLine"></p>
-        <div id="trophyList"></div>
-      </div>
-      <article class="detail" id="detailPane" aria-live="polite"></article>
-      <aside class="rail" id="rightRail"></aside>
-    </div>
-  </section>
-
-  <section class="view" id="view-roadmap" hidden>
-    <div class="pagehead">
-      <h2>Roadmap to the platinum</h2>
-      <p id="roadmapIntro"></p>
-      <div class="summary-chips" id="roadmapChips"></div>
-    </div>
-    <div class="roadmap-cols">
-      <ol class="stages" id="stageList"></ol>
-      <aside class="rail roadmap-rail" id="missableWatch"></aside>
-    </div>
-  </section>
-
-  <section class="view" id="view-missables" hidden>
-    <div class="pagehead">
-      <h2>Missables &amp; watch list</h2>
-      <p>One trophy can be lost for a whole playthrough. Eight more are flagged WATCH — specific setups that are easy to fumble — and eight are UNCONFIRMED, where launch sources have not yet verified the trigger. Everything else can be cleaned up in free roam after the story.</p>
-    </div>
-    <div id="flagGroups"></div>
-  </section>
-
-  <section class="view" id="view-planner" hidden>
-    <div class="pagehead">
-      <h2>Next up / session planner</h2>
-      <p>Tell the planner how long you have. It spends the time on the earliest ungated trophies first — the possibly missable one outranks everything — and never schedules a trophy behind a stage you have not reached.</p>
-    </div>
-    <div class="planner-controls">
-      <label>Hours available this session
-        <select id="hoursSelect">
-          <option value="1">1 hour</option>
-          <option value="2" selected>2 hours</option>
-          <option value="4">4 hours</option>
-          <option value="6">6 hours</option>
-          <option value="10">10 hours</option>
-        </select>
-      </label>
-      <p class="plan-summary" id="planSummary"></p>
-    </div>
-    <ol class="plan" id="planList"></ol>
-    <h3 class="subhead">Earliest ungated — the full Next Up queue</h3>
-    <ol class="plan queue" id="queueList"></ol>
-  </section>
-
-  <section class="view" id="view-matrix" hidden>
-    <div class="pagehead">
-      <h2>Source matrix — claims per trophy × source</h2>
-      <p id="matrixIntro"></p>
-    </div>
-    <div class="matrix-wrap"><table class="matrix" id="matrixTable"></table></div>
-  </section>
-
-  <section class="view" id="view-sources" hidden>
-    <div class="pagehead">
-      <h2>Sources — per page, not per site</h2>
-      <p id="sourcesIntro"></p>
-    </div>
-    <ol class="sources" id="sourceList"></ol>
-    <h3 class="subhead">Disputes — shown both ways, with our call</h3>
-    <div id="disputeList"></div>
-    <div class="disagree-box" id="disagreeBox"></div>
-  </section>
-</main>
-
-<footer class="foot">
-  <p>Progress, counters, per-step ticks and notes save in this browser (localStorage) and leave it only through Export. The app loads nothing over the network and works fully offline. No Rockstar Games logo, artwork or game screenshots are used; the look is this atlas's own.</p>
-  <p class="muted" id="footSources"></p>
+<footer class="colophon">
+  <p>Progress is stored only in this browser (localStorage) and travels with the export file — nothing is uploaded anywhere.</p>
 </footer>
-<script type="module" src="js/app.js"></script>
+
+<input type="file" id="import-file" accept="application/json" hidden>
+<script src="js/store.js"></script>
+<script src="js/planner.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>

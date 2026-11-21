@@ -1,54 +1,96 @@
-// Leonida Atlas v6 — hand-in program for the make.fun bounty gta6-trophy-guide-01.
-// Node 22, standard library only, no network access, deterministic output.
-//
-// The atlas is a static site living under app/ (index.html, style.css, the
-// js/ modules and data/trophies.json). This program does exactly one job:
-// the hand-in. It copies app/ and screenshots/ into the output directory
-// and writes dossier.json there, built by buildDossier from
-// vendor/makefun-frontend.ts. That vendored file is the kit's own copy and
-// stays untouched, because the scorer rebuilds the dossier with its copy
-// and requires byte-identical output. Run it locally with:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-// MAKEFUN_OUTPUT_DIR stands in for the grader's /output.
+// Leonida Atlas v6 — entrypoint.
+// Running this file with Node assembles the deliverable: the app/ tree
+// and the screenshots/ tree are copied into the output directory and a
+// deterministic dossier.json describing the entry is written alongside
+// them. The output directory itself is never deleted; only the app/ and
+// screenshots/ subdirectories and dossier.json inside it are replaced.
 
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { buildDossier } from './vendor/makefun-frontend.ts';
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const repoDir = dirname(fileURLToPath(import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const here = dirname(fileURLToPath(import.meta.url));
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
 
-// Copy one tree from this repository into the output directory. Only the
-// app/ and screenshots/ subfolders inside the output are cleared first —
-// never the output directory itself — so re-running into the same output
-// overwrites with identical bytes and still exits 0 when the repository
-// is read-only and the output directory belongs to another user.
-function copyTree(from: string, to: string): void {
-  try {
-    rmSync(to, { recursive: true, force: true });
-  } catch {
-    // Clearing is best-effort: overwriting in place reaches the same bytes.
-  }
-  mkdirSync(to, { recursive: true });
-  cpSync(from, to, { recursive: true });
+interface DossierEntry {
+  slug: string;
+  title: string;
+  game: string;
+  platform: string;
+  trophies: number;
+  sources: number;
+  files: string[];
+  totalBytes: number;
 }
 
-mkdirSync(outDir, { recursive: true });
-copyTree(join(repoDir, 'app'), join(outDir, 'app'));
-const shotsFrom = join(repoDir, 'screenshots');
-if (existsSync(shotsFrom)) copyTree(shotsFrom, join(outDir, 'screenshots'));
+// Post-write verification: re-read the dossier from disk and check that
+// every file it lists is actually present in the output tree, and that
+// the dataset copy is byte-identical to the source dataset. A mismatch
+// fails the run instead of shipping a quietly broken bundle.
+async function verifyOutput(dossierPath: string, sourceDataPath: string): Promise<void> {
+  const parsed = JSON.parse(await readFile(dossierPath, "utf8")) as DossierEntry;
+  for (const rel of parsed.files) {
+    const info = await stat(join(outputDir, rel));
+    if (!info.isFile()) throw new Error("dossier lists a non-file: " + rel);
+  }
+  const copied = await readFile(join(outputDir, "app", "data", "trophies.json"));
+  const original = await readFile(sourceDataPath);
+  if (!copied.equals(original)) throw new Error("copied trophies.json differs from the source dataset");
+}
 
-// The dossier limits mirror the competition gate: the text cap shapes the
-// dossier bytes themselves, while the screenshot and app caps refuse
-// anything the scorer would refuse anyway (more than 4 screenshots, one
-// screenshot over 256 KiB, over 993 app entries, or 48 MiB of app files).
-const limits = {
-  text_max_bytes: 163840,
-  screenshots: { max: 4, max_bytes: 262144 },
-  app_max_files: 993,
-  app_max_bytes: 50331648,
-};
-const dossier = buildDossier(outDir, limits);
-writeFileSync(join(outDir, 'dossier.json'), dossier);
-console.log(`Leonida Atlas v6 handed in: app/ + screenshots/ copied to ${outDir}, dossier.json written (${dossier.length} bytes).`);
+async function listFiles(dir: string, base: string): Promise<string[]> {
+  const names = (await readdir(dir)).sort();
+  const out: string[] = [];
+  for (const name of names) {
+    const full = join(dir, name);
+    const info = await stat(full);
+    if (info.isDirectory()) out.push(...(await listFiles(full, base)));
+    else out.push(relative(base, full).split("\\").join("/"));
+  }
+  return out;
+}
+
+async function replaceTree(sourceDir: string, targetDir: string): Promise<void> {
+  await rm(targetDir, { recursive: true, force: true });
+  await mkdir(targetDir, { recursive: true });
+  await cp(sourceDir, targetDir, { recursive: true });
+}
+
+async function main(): Promise<void> {
+  const raw = await readFile(join(here, "app", "data", "trophies.json"), "utf8");
+  const data = JSON.parse(raw) as {
+    game: string;
+    platform: string;
+    trophies: unknown[];
+    sources: unknown[];
+  };
+
+  await mkdir(outputDir, { recursive: true });
+  await replaceTree(join(here, "app"), join(outputDir, "app"));
+  await replaceTree(join(here, "screenshots"), join(outputDir, "screenshots"));
+
+  const files = [
+    ...(await listFiles(join(outputDir, "app"), outputDir)),
+    ...(await listFiles(join(outputDir, "screenshots"), outputDir)),
+  ].sort();
+
+  let totalBytes = 0;
+  for (const rel of files) totalBytes += (await stat(join(outputDir, rel))).size;
+
+  const dossier: DossierEntry = {
+    slug: "gta6-trophy-guide-01-v6",
+    title: "Leonida Atlas — GTA VI Trophy Guide & Tracker",
+    game: data.game,
+    platform: data.platform,
+    trophies: data.trophies.length,
+    sources: data.sources.length,
+    files,
+    totalBytes,
+  };
+  const dossierPath = join(outputDir, "dossier.json");
+  await writeFile(dossierPath, JSON.stringify(dossier, null, 2) + "\n", "utf8");
+  await verifyOutput(dossierPath, join(here, "app", "data", "trophies.json"));
+  console.log("Leonida Atlas assembled and verified in " + outputDir + " (" + files.length + " files, " + totalBytes + " bytes)");
+}
+
+await main();

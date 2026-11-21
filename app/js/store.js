@@ -1,63 +1,115 @@
-// Leonida Atlas v6 — progress store.
-// Everything the tracker remembers lives in one localStorage record:
-// earned trophy ids, per-trophy counters, per-step checkboxes (keyed
-// "trophyId-stepIndex") and the spoiler-safe switch. Export downloads
-// that record as JSON; import reads it back, step progress included.
+// Leonida Atlas — progress store.
+// Everything the player ticks, counts or plans lives in one plain object
+// that is mirrored to localStorage after every change and can be exported
+// to / imported from a JSON file. No framework, no build step.
 
-const STORAGE_KEY = 'leonida-atlas-v6-progress';
+const STORAGE_KEY = "leonida-atlas-progress-v6";
+const EXPORT_FORMAT = "leonida-atlas-export/1";
 
-export function emptyState() {
-  return { earned: [], counters: {}, steps: {}, spoilerSafe: true };
-}
-
-function clean(parsed) {
+function blankProgress() {
   return {
-    earned: Array.isArray(parsed.earned) ? parsed.earned.filter((n) => Number.isInteger(n)) : [],
-    counters: parsed.counters && typeof parsed.counters === 'object' ? parsed.counters : {},
-    steps: parsed.steps && typeof parsed.steps === 'object' ? parsed.steps : {},
-    spoilerSafe: parsed.spoilerSafe !== false,
-  };
-}
-
-export function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return emptyState();
-    return clean(JSON.parse(raw));
-  } catch {
-    return emptyState();
-  }
-}
-
-export function saveState(state) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
-
-export function demoState() {
-  // A seeded mid-run save, used by ?seed=demo for previews and screenshots:
-  // 13 of 55 earned (Chapter 1 story beats among them, so spoiler-safe mode
-  // has earned story names to reveal), counters part-way on the big grinds
-  // (Positive Mental Attitude sits at 6 of 18), and the first steps of the
-  // open trophy already ticked.
-  return {
-    earned: [2, 3, 8, 9, 10, 11, 12, 13, 20, 21, 29, 33, 41],
-    counters: { 14: 12, 15: 47, 16: 3, 17: 9, 18: 2, 19: 4, 25: 2, 28: 6, 30: 1, 31: 22, 32: 11, 35: 38, 42: 9, 43: 2, 54: 3, 55: 4 },
-    steps: { '28-0': true, '28-1': true, '28-2': true, '28-3': true },
+    earned: {},      // trophy id -> true once the trophy is marked earned
+    stepsDone: {},   // "trophyId:stepIndex" -> true
+    counters: {},    // trophy id -> current counter value
+    plan: [],        // trophy ids, in the order they were added
     spoilerSafe: true,
   };
 }
 
-export function exportState(state) {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = 'leonida-atlas-v6-progress.json';
-  link.click();
-  URL.revokeObjectURL(link.href);
+// A lived-in sample used only when the page is opened with ?seed=demo,
+// so screenshots and first impressions show the tracker mid-run.
+function demoProgress() {
+  const p = blankProgress();
+  const earnedIds = [2, 3, 8, 10, 11, 16, 20, 21, 22, 25, 26, 33, 34];
+  for (const id of earnedIds) p.earned[id] = true;
+  const ticked = ["28:0", "28:1", "28:2", "2:0"];
+  for (const key of ticked) p.stepsDone[key] = true;
+  p.counters = {
+    15: 21, 16: 2, 17: 9, 18: 5, 19: 7, 25: 3, 28: 6, 30: 1,
+    31: 31, 32: 18, 35: 34, 40: 2, 42: 16, 43: 2, 54: 2, 55: 4,
+  };
+  p.plan = [28, 17, 31];
+  return p;
 }
 
-export function parseImported(text) {
-  const parsed = JSON.parse(text);
-  if (!parsed || !Array.isArray(parsed.earned)) throw new Error('not an atlas progress file');
-  return clean(parsed);
+function loadProgress() {
+  const params = new URLSearchParams(location.search);
+  if (params.get("seed") === "demo") return demoProgress();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return blankProgress();
+    const parsed = JSON.parse(raw);
+    return Object.assign(blankProgress(), parsed);
+  } catch {
+    return blankProgress();
+  }
+}
+
+function saveProgress(progress) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory
+    // state still drives the page for this session.
+  }
+}
+
+function exportProgress(progress) {
+  const payload = {
+    format: EXPORT_FORMAT,
+    progress: {
+      earned: progress.earned,
+      stepsDone: progress.stepsDone,
+      counters: progress.counters,
+      plan: progress.plan,
+      spoilerSafe: progress.spoilerSafe,
+    },
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "leonida-atlas-progress.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+}
+
+function importProgress(file, onDone, onError) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result));
+      const incoming = parsed && parsed.progress ? parsed.progress : parsed;
+      if (!incoming || typeof incoming !== "object") throw new Error("not a progress file");
+      const merged = Object.assign(blankProgress(), incoming);
+      onDone(merged);
+    } catch (err) {
+      onError(err);
+    }
+  };
+  reader.onerror = () => onError(reader.error);
+  reader.readAsText(file);
+}
+
+// Sum of the "collectible-style" counters currently logged: plain unit
+// counters only (no percentages, no dollar totals, no choice tallies).
+function loggedUnits(progress, trophies) {
+  let total = 0;
+  for (const t of trophies) {
+    if (typeof t.count !== "number") continue;
+    if (t.countLabel === "%" || t.countLabel === "choices") continue;
+    if (t.countLabel.includes("dollars")) continue;
+    total += Math.min(progress.counters[t.id] || 0, t.count);
+  }
+  return total;
+}
+
+function targetUnits(trophies) {
+  let total = 0;
+  for (const t of trophies) {
+    if (typeof t.count !== "number") continue;
+    if (t.countLabel === "%" || t.countLabel === "choices") continue;
+    if (t.countLabel.includes("dollars")) continue;
+    total += t.count;
+  }
+  return total;
 }

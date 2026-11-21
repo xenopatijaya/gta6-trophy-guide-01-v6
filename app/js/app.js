@@ -1,502 +1,616 @@
-// Leonida Atlas v6 — boot, rendering and interaction for the trophy atlas.
-// Data comes from data/trophies.json (the 55 official trophies, each with a
-// guide whose every atomic step carries bracketed source citations like
-// [5][8], a per-page source list of 40 pages, and a disputes list shown
-// both ways). Nothing is fetched from the network beyond the app's own
-// files. Every audit number below is computed live from that data file.
+// Leonida Atlas v6 — application logic.
+// One dataset (data/trophies.json) drives every number on the page:
+// the header audit strip, the ledger, the roadmap, the watch list,
+// the planner and the source matrix are all computed at runtime.
 
-import { demoState, emptyState, exportState, loadState, parseImported, saveState } from './store.js';
-import { nextUpQueue, platinumEta, sessionPlan } from './planner.js';
+let DATA = null;
+let progress = loadProgress();
+let ui = {
+  view: "ledger",
+  query: "",
+  kind: "all",
+  grade: "all",
+  stage: "all",
+  earnedOnly: false,
+  selectedId: 28,
+};
 
-const params = new URLSearchParams(location.search);
-const doc = await (await fetch('data/trophies.json')).json();
-const trophies = doc.trophies;
-const sources = doc.sources;
-const stages = doc.stages;
-const disputes = doc.disputes || [];
-const byId = new Map(trophies.map((t) => [t.id, t]));
-const sourceByN = new Map(sources.map((s) => [s.n, s]));
-
-let state = params.get('seed') === 'demo' ? demoState() : loadState();
-if (params.get('seed') === 'demo') saveState(state);
-
-let selectedId = 28; // Positive Mental Attitude opens by default.
-let activeView = ['ledger', 'roadmap', 'missables', 'planner', 'matrix', 'sources'].includes(params.get('view'))
-  ? params.get('view')
-  : 'ledger';
-let kindFilter = 'all';
-
-const $ = (id) => document.getElementById(id);
-const earnedSet = () => new Set(state.earned);
-const isEarned = (t) => earnedSet().has(t.id);
-const counterOf = (t) => Math.min(t.count || 0, state.counters[t.id] || 0);
-const citedByCount = (n) => trophies.filter((t) => t.sources.includes(n)).length;
-const totalSteps = trophies.reduce((sum, t) => sum + t.steps.length, 0);
-const citedSteps = trophies.reduce((sum, t) => sum + t.steps.filter((s) => /\[\d+\]/.test(s)).length, 0);
-const stepsDone = (t) => t.steps.filter((_, i) => state.steps[`${t.id}-${i}`]).length;
-const totalStepsDone = trophies.reduce((sum, t) => sum + stepsDone(t), 0);
-// Collectible targets: every PSN counter except the 100% percent and the
-// two dollar totals and the 500-choice counter — the things you collect,
-// complete or log as you roam Leonida.
-const isCollectibleCounter = (t) => Boolean(t.count) && t.countLabel !== '%' && !/dollars|choices/.test(t.countLabel || '');
-const collectibleTargets = trophies.filter(isCollectibleCounter).reduce((sum, t) => sum + t.count, 0);
-const collectiblesLogged = trophies.filter(isCollectibleCounter).reduce((sum, t) => sum + counterOf(t), 0);
-const multiSourced = trophies.filter((t) => t.sources.length >= 2).length;
-// Claims: a claim is one bracketed citation inside one trophy's guide or
-// steps. claimsFor(t, n) counts how many claims of trophy t rest on source n.
-function claimsFor(t, n) {
-  const needle = `[${n}]`;
-  let hits = 0;
-  for (const text of [t.guide, ...t.steps]) hits += text.split(needle).length - 1;
-  return hits;
-}
-const totalClaims = trophies.reduce((sum, t) => sum + sources.reduce((s2, s) => s2 + claimsFor(t, s.n), 0), 0);
+const appEl = document.getElementById("app");
 
 function esc(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function citeHtml(text) {
-  // Turn [5][8] citation markers into styled spans; the numbers stay visible.
+// Turn "[5][23]" citation markers in dataset prose into styled spans.
+function cited(text) {
   return esc(text).replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>');
 }
 
-function spoilerMasked(t) {
-  return state.spoilerSafe && t.kind === 'story' && !isEarned(t);
+function citationsIn(text) {
+  const found = String(text).match(/\[\d+\]/g);
+  return found ? found.length : 0;
 }
 
-function displayName(t) {
-  return spoilerMasked(t) ? 'Story trophy — hidden until earned' : t.name;
+function trophyClaims(trophy) {
+  let n = citationsIn(trophy.guide);
+  for (const step of trophy.steps) n += citationsIn(step);
+  return n;
 }
 
-function flagPip(t) {
-  if (t.flag === 'missable') return '<span class="pip flag-missable">Possibly missable</span>';
-  if (t.flag === 'watch') return '<span class="pip flag-watch">Watch</span>';
-  if (t.flag === 'unconfirmed') return '<span class="pip flag-unconfirmed">Unconfirmed</span>';
-  return '';
+function gradeSplit(trophies) {
+  const split = { platinum: 0, gold: 0, silver: 0, bronze: 0 };
+  for (const t of trophies) split[t.grade]++;
+  return split;
 }
 
-function renderHeader() {
-  const earned = state.earned.length;
-  $('earnedCount').textContent = String(earned);
-  $('progressFill').style.width = `${(earned / trophies.length) * 100}%`;
-  const parts = ['platinum', 'gold', 'silver', 'bronze'].map((g) => {
-    const total = trophies.filter((t) => t.grade === g).length;
-    const got = trophies.filter((t) => t.grade === g && isEarned(t)).length;
-    return `${got}/${total} ${g}`;
-  });
-  $('gradeBreakdown').textContent = parts.join(' · ');
-  $('collectiblesLogged').textContent = `${collectiblesLogged} collectibles logged · ${totalStepsDone}/${totalSteps} steps ticked`;
+function computeAudit(data) {
+  const trophies = data.trophies;
+  const split = gradeSplit(trophies);
+  let stepsTotal = 0;
+  let stepsCited = 0;
+  let claims = 0;
+  let guidesSourced = 0;
+  let guidesMulti = 0;
+  const citedBy = new Map();
+  for (const t of trophies) {
+    stepsTotal += t.steps.length;
+    for (const step of t.steps) if (citationsIn(step) > 0) stepsCited++;
+    claims += trophyClaims(t);
+    if (t.sources.length >= 1) guidesSourced++;
+    if (t.sources.length >= 2) guidesMulti++;
+    for (const n of t.sources) citedBy.set(n, (citedBy.get(n) || 0) + 1);
+  }
+  const sites = new Set(data.sources.map((s) => new URL(s.url).hostname.replace(/^www\./, "")));
+  return {
+    split, stepsTotal, stepsCited, claims, guidesSourced, guidesMulti, citedBy,
+    hidden: trophies.filter((t) => t.hidden).length,
+    missable: trophies.filter((t) => t.flag === "missable").length,
+    watch: trophies.filter((t) => t.flag === "watch").length,
+    unconfirmed: trophies.filter((t) => t.flag === "unconfirmed").length,
+    sites: sites.size,
+    targets: targetUnits(trophies),
+  };
 }
 
-function renderAudit() {
-  const grades = ['platinum', 'gold', 'silver', 'bronze'].map((g) => `${trophies.filter((t) => t.grade === g).length}${g[0].toUpperCase()}`).join(' ');
-  const hidden = trophies.filter((t) => t.hidden).length;
-  const watch = trophies.filter((t) => t.flag === 'watch').length;
-  const unconfirmed = trophies.filter((t) => t.flag === 'unconfirmed').length;
-  const missable = trophies.filter((t) => t.flag === 'missable').length;
-  const sites = new Set(sources.map((s) => s.name.split('—')[0].trim())).size;
-  $('auditStrip').innerHTML =
-    `<span><b>AUDIT · LIVE FROM DATA</b></span>` +
-    `<span><b>${trophies.length}/${trophies.length}</b> official · ${grades}</span>` +
-    `<span><b>${hidden}</b> PSN-hidden</span>` +
-    `<span><b>${citedSteps}/${totalSteps}</b> steps cited</span>` +
-    `<span><b>${trophies.length}/${trophies.length}</b> guides sourced</span>` +
-    `<span><b>${multiSourced}</b> guides on 2+ sources</span>` +
-    `<span><b>${totalClaims}</b> claims</span>` +
-    `<span><b>${sources.length}</b> pages / ${sites} sites read ${esc(doc.readDate)}</span>` +
-    `<span class="warn">${missable} possibly missable</span>` +
-    `<span><b>${watch}</b> at risk (watch)</span>` +
-    `<span><b>${unconfirmed}</b> unconfirmed</span>` +
-    `<span><b>${disputes.length}</b> disputes shown both ways</span>` +
-    `<span><b>${collectibleTargets}</b> collectible targets</span>` +
-    `<span><b>${collectiblesLogged}</b> logged</span>`;
+function renderMasthead() {
+  const trophies = DATA.trophies;
+  const earned = earnedByGrade(progress, trophies);
+  const earnedCount = trophies.filter((t) => isEarned(progress, t)).length;
+  const pct = Math.round((earnedCount / trophies.length) * 1000) / 10;
+  const ticked = totalStepsTicked(progress, trophies);
+  const totalSteps = trophies.reduce((s, t) => s + t.steps.length, 0);
+  document.getElementById("masthead-progress").innerHTML =
+    '<div class="big-count">' + earnedCount + ' <small>/ ' + trophies.length + ' earned</small></div>' +
+    '<div class="progress-track"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+    '<div class="tally-line">' + earned.platinum + '/1 platinum · ' + earned.gold + '/2 gold · ' +
+    earned.silver + '/6 silver · ' + earned.bronze + '/46 bronze</div>' +
+    '<div class="tally-line"><b>' + loggedUnits(progress, trophies) + ' collectibles logged</b> · ' +
+    ticked + '/' + totalSteps + ' steps ticked</div>';
 }
+
+function renderAuditStrip() {
+  const a = computeAudit(DATA);
+  const el = document.getElementById("audit-strip");
+  el.innerHTML =
+    '<div class="audit-inner">' +
+    '<span class="audit-label">AUDIT · LIVE FROM DATA</span>&nbsp; ' +
+    '<b>' + DATA.trophies.length + '/' + DATA.trophies.length + '</b> official · ' +
+    '1P ' + a.split.gold + 'G ' + a.split.silver + 'S ' + a.split.bronze + 'B&nbsp; ' +
+    '<b>' + a.hidden + '</b> PSN-hidden&nbsp; ' +
+    '<b>' + a.stepsCited + '/' + a.stepsTotal + '</b> steps cited&nbsp; ' +
+    '<b>' + a.guidesSourced + '/' + DATA.trophies.length + '</b> guides sourced&nbsp; ' +
+    '<b>' + a.guidesMulti + '</b> guides on 2+ sources&nbsp; ' +
+    '<b>' + a.claims + '</b> claims&nbsp; ' +
+    '<b>' + DATA.sources.length + '</b> pages / ' + a.sites + ' sites read ' + esc(DATA.readDate) + '&nbsp; ' +
+    '<span class="warn">' + a.missable + ' possibly missable</span><br>' +
+    '<b>' + a.watch + '</b> at risk (watch)&nbsp; ' +
+    '<b>' + a.unconfirmed + '</b> unconfirmed&nbsp; ' +
+    '<b>' + DATA.disputes.length + '</b> disputes shown both ways&nbsp; ' +
+    '<b>' + a.targets + '</b> collectible targets&nbsp; ' +
+    '<b>' + loggedUnits(progress, DATA.trophies) + '</b> logged' +
+    '</div>';
+}
+
+function persist() {
+  saveProgress(progress);
+  renderMasthead();
+  renderAuditStrip();
+}
+
+function flagPill(trophy) {
+  if (trophy.flag === "missable") return '<span class="pill flag">Possibly Missable</span>';
+  if (trophy.flag === "watch") return '<span class="pill warn">Watch</span>';
+  if (trophy.flag === "unconfirmed") return '<span class="pill dark">Unconfirmed</span>';
+  return "";
+}
+
+function displayName(trophy) {
+  if (progress.spoilerSafe && trophy.hidden) return "Story trophy — hidden until earned";
+  return trophy.name;
+}
+
+function displayDesc(trophy) {
+  if (progress.spoilerSafe && trophy.hidden) return "Description hidden by spoiler-safe mode.";
+  return trophy.description;
+}
+
+/* ---------------- ledger view ---------------- */
 
 function matchesFilters(t) {
-  const q = $('searchBox').value.trim().toLowerCase();
-  if (kindFilter !== 'all' && t.kind !== kindFilter) return false;
-  if ($('gradeSelect').value !== 'all' && t.grade !== $('gradeSelect').value) return false;
-  if ($('stageSelect').value !== 'all' && t.stage !== Number($('stageSelect').value)) return false;
-  if ($('earnedOnly').checked && !isEarned(t)) return false;
-  if (q) {
-    const hay = `${t.name} ${t.description} ${t.guide} ${t.kind}`.toLowerCase();
-    if (!hay.includes(q)) return false;
+  if (ui.kind !== "all" && t.kind !== ui.kind) return false;
+  if (ui.grade !== "all" && t.grade !== ui.grade) return false;
+  if (ui.stage !== "all" && t.stage !== Number(ui.stage)) return false;
+  if (ui.earnedOnly && !isEarned(progress, t)) return false;
+  if (ui.query) {
+    const hay = (t.name + " " + t.description + " " + t.guide).toLowerCase();
+    if (!hay.includes(ui.query.toLowerCase())) return false;
   }
   return true;
 }
 
-function chapterLabel(stageN) {
-  const stage = stages.find((s) => s.n === stageN);
-  return stage ? stage.title : `Stage ${stageN}`;
+function toolbarHtml() {
+  const kinds = [["all", "All kinds"], ["story", "Story"], ["activities", "Activities"], ["collectibles", "Collectibles"], ["meta", "Meta"]];
+  const kindBtns = kinds.map(([k, label]) =>
+    '<button class="chip-btn' + (ui.kind === k ? " is-on" : "") + '" data-kind="' + k + '">' + label + '</button>').join("");
+  const gradeOpts = ["all", "platinum", "gold", "silver", "bronze"].map((g) =>
+    '<option value="' + g + '"' + (ui.grade === g ? " selected" : "") + '>' + (g === "all" ? "All grades" : g[0].toUpperCase() + g.slice(1)) + '</option>').join("");
+  const stageOpts = ['<option value="all"' + (ui.stage === "all" ? " selected" : "") + '>All stages</option>']
+    .concat(DATA.stages.map((s) => '<option value="' + s.n + '"' + (Number(ui.stage) === s.n ? " selected" : "") + '>Stage ' + s.n + '</option>')).join("");
+  return '<div class="toolbar">' +
+    '<label class="field">SEARCH<input type="search" id="f-query" placeholder="Name, description, guide text..." value="' + esc(ui.query) + '"></label>' +
+    '<div class="field">KIND<div class="kind-chips">' + kindBtns + '</div></div>' +
+    '<label class="field">GRADE<select id="f-grade">' + gradeOpts + '</select></label>' +
+    '<label class="field">STAGE<select id="f-stage">' + stageOpts + '</select></label>' +
+    '<label class="toggle-line"><input type="checkbox" id="f-earned"' + (ui.earnedOnly ? " checked" : "") + '> Earned only</label>' +
+    '<label class="toggle-line"><input type="checkbox" id="f-spoiler"' + (progress.spoilerSafe ? " checked" : "") + '> Spoiler-safe</label>' +
+    '<button class="btn" id="btn-export">Export</button>' +
+    '<button class="btn ghost" id="btn-import">Import</button>' +
+    '<button class="btn danger" id="btn-reset">Reset</button>' +
+    '</div>';
 }
 
-function renderList() {
-  const wrap = $('trophyList');
-  wrap.replaceChildren();
-  let shown = 0;
-  for (const stage of stages) {
-    const inStage = trophies.filter((t) => t.stage === stage.n && matchesFilters(t));
+function ledgerListHtml(list) {
+  let html = "";
+  for (const stage of DATA.stages) {
+    const inStage = list.filter((t) => t.stage === stage.n);
     if (!inStage.length) continue;
-    const allInStage = trophies.filter((t) => t.stage === stage.n);
-    const got = allInStage.filter((t) => isEarned(t)).length;
-    const head = document.createElement('div');
-    head.className = 'chapter-head';
-    head.innerHTML = `<span>${esc(chapterLabel(stage.n))}</span><span class="chapter-prog">${got}/${allInStage.length} earned · ≈${stage.hours} h</span><span class="chapter-bar"><span style="width:${allInStage.length ? (got / allInStage.length) * 100 : 0}%"></span></span>`;
-    wrap.append(head);
-    const ul = document.createElement('ul');
-    ul.className = 'trophy-list';
+    const allInStage = DATA.trophies.filter((t) => t.stage === stage.n);
+    const earnedInStage = allInStage.filter((t) => isEarned(progress, t)).length;
+    const pctStage = Math.round((earnedInStage / allInStage.length) * 100);
+    html += '<div class="group-heading"><span><b>' + esc(stage.title.split("—")[0].trim()) + '</b> — ' +
+      esc(stage.title.split("—")[1] ? stage.title.split("—")[1].trim() : "") + '</span>' +
+      '<span>' + earnedInStage + '/' + allInStage.length + ' earned · ≈' + stage.hours + ' h</span>' +
+      '<span class="group-bar"><i style="width:' + pctStage + '%"></i></span></div>';
     for (const t of inStage) {
-      shown += 1;
-      const li = document.createElement('li');
-      if (t.id === selectedId) li.className = 'selected';
-      if (isEarned(t)) li.classList.add('earned');
-      const masked = spoilerMasked(t);
-      const counter = t.count
-        ? `<span class="counter-chip">${esc(t.countLabel || 'done')} ${counterOf(t)}/${t.count}</span>`
-        : '';
-      const stepProg = `<span class="counter-chip">steps ${stepsDone(t)}/${t.steps.length}</span>`;
-      li.innerHTML =
-        `<input type="checkbox" ${isEarned(t) ? 'checked' : ''} aria-label="Mark earned">` +
-        `<div><div class="t-name">${esc(displayName(t))}</div>` +
-        `<div class="t-desc">${masked ? 'Description hidden by spoiler-safe mode.' : esc(t.description)}</div>` +
-        `<div class="t-meta"><span class="pip grade-${t.grade}">${t.grade} · ${t.points} pts</span>` +
-        `<span class="pip">Stage ${t.stage}</span><span class="pip">${esc(t.kind)}</span>` +
-        (t.hidden ? '<span class="pip hidden-pip">Hidden</span>' : '') + flagPip(t) + counter + stepProg + `</div></div>`;
-      const box = li.querySelector('input');
-      box.addEventListener('click', (e) => e.stopPropagation());
-      box.addEventListener('change', () => toggleEarned(t.id));
-      li.addEventListener('click', () => { selectedId = t.id; renderAll(); });
-      ul.append(li);
+      html += '<button class="trophy-row' + (t.id === ui.selectedId ? " is-selected" : "") + '" data-select="' + t.id + '">' +
+        '<input type="checkbox" data-earned="' + t.id + '"' + (isEarned(progress, t) ? " checked" : "") + '>' +
+        '<span><span class="row-name">' + esc(displayName(t)) + '</span>' +
+        '<span class="row-desc" style="display:block">' + esc(displayDesc(t)) + '</span>' +
+        '<span class="pill grade-' + t.grade + '">' + t.grade[0].toUpperCase() + t.grade.slice(1) + ' · ' + t.points + ' Pts</span>' +
+        '<span class="pill">Stage ' + t.stage + '</span>' +
+        '<span class="pill">' + t.kind[0].toUpperCase() + t.kind.slice(1) + '</span>' +
+        (t.hidden ? '<span class="pill dark">Hidden</span>' : '') +
+        '<span class="pill steps">steps ' + stepsTicked(progress, t) + '/' + t.steps.length + '</span></span></button>';
     }
-    wrap.append(ul);
   }
-  $('countLine').textContent = `Showing ${shown} of 55 trophies · ${state.earned.length} earned · ${totalStepsDone}/${totalSteps} steps ticked · click a row for its cited guide`;
+  return html || '<p class="empty-note">No trophies match the current filters.</p>';
 }
 
-function toggleEarned(id) {
-  const set = earnedSet();
-  if (set.has(id)) set.delete(id); else set.add(id);
-  state.earned = [...set];
-  saveState(state);
-  renderAll();
-}
+function detailHtml(t) {
+  const disputes = DATA.disputes.filter((d) => d.trophy === t.name);
+  let html = '<div class="detail-card">';
+  html += '<h2>' + esc(t.name) + '</h2>';
+  html += '<div class="official-line"><span class="official-label">OFFICIAL DESCRIPTION</span><i>“' +
+    esc(t.description) + '”</i> <span class="cite">[1]</span></div>';
+  html += '<div>' +
+    '<span class="pill grade-' + t.grade + '">' + t.grade[0].toUpperCase() + t.grade.slice(1) + ' · ' + t.points + ' PSN Pts</span>' +
+    flagPill(t) +
+    (disputes.length ? '<span class="pill warn">Sources Differ</span>' : '') +
+    '<span class="pill">Stage ' + t.stage + ' · ' + t.kind[0].toUpperCase() + t.kind.slice(1) +
+    ' · Difficulty ' + t.difficulty + '/10 · ≈' + t.hours + ' h</span></div>';
 
-function disputeBoxFor(t) {
-  const mine = disputes.filter((d) => d.trophy === t.name);
-  if (!mine.length) return '';
-  // The detail pane shows the trophy's first dispute in full, so the cited
-  // steps stay above the fold; every dispute is shown on the Sources tab.
-  const d = mine[0];
-  const more = mine.length > 1 ? ` (+${mine.length - 1} more on this trophy — all ${disputes.length} disputes sit on the Sources tab.)` : '';
-  return `<div class="dispute-box"><div class="dispute-topic">DISPUTE — ${esc(d.topic)}</div>` +
-    `<div class="dispute-ab"><div><b>Version A</b><p>${citeHtml(d.a)}</p></div><div><b>Version B</b><p>${citeHtml(d.b)}</p></div></div>` +
-    `<p class="dispute-call">${citeHtml(d.call)}${more}</p></div>`;
-}
+  if (typeof t.count === "number") {
+    const cur = Math.min(progress.counters[t.id] || 0, t.count);
+    const pctC = Math.round((cur / t.count) * 100);
+    html += '<div class="counter-box"><span class="counter-label">YOUR COUNT</span>' +
+      '<button class="step-btn" data-count="' + t.id + ':-1">−</button>' +
+      '<span class="counter-value">' + cur.toLocaleString("en-US") + ' / ' + t.count.toLocaleString("en-US") + ' ' + esc(t.countLabel) + '</span>' +
+      '<span class="counter-bar"><i style="width:' + pctC + '%"></i></span>' +
+      '<button class="step-btn" data-count="' + t.id + ':1">+</button></div>';
+  }
 
-function renderDetail() {
-  const t = byId.get(selectedId) || trophies[0];
-  const masked = spoilerMasked(t);
-  const stage = stages.find((s) => s.n === t.stage);
-  let callouts = '';
-  if (t.flag === 'missable') {
-    callouts += `<div class="callout missable"><b>MISSABLE WINDOW.</b> The first meditation, at Jason's house in Chapter 1, is gone once Chapter 1 ends — do it after Down to Earth and keep a chapter-start save <span class="cite">[5]</span><span class="cite">[8]</span><span class="cite">[22]</span>.</div>`;
-  } else if (t.flag === 'watch') {
-    callouts += `<div class="callout watch"><b>WATCH.</b> Not missable, but the setup is specific and easy to fumble — read the steps before you attempt it.</div>`;
-  } else if (t.flag === 'unconfirmed') {
-    callouts += `<div class="callout unconfirmed"><b>UNCONFIRMED.</b> Launch sources have not verified the exact trigger yet. This guide says so instead of inventing a method.</div>`;
+  if (t.flag === "missable") {
+    html += '<div class="callout missable"><b>MISSABLE WINDOW.</b> The first meditation, at Jason\'s house in Chapter 1, ' +
+      'is gone once Chapter 1 ends — do it after Down to Earth and keep a chapter-start save <span class="cite">[5]</span><span class="cite">[8]</span><span class="cite">[22]</span>.</div>';
+  } else if (t.flag === "watch") {
+    html += '<div class="callout watch"><b>WATCH.</b> This one has a specific setup that is easy to fumble — read the steps before attempting it.</div>';
+  } else if (t.flag === "unconfirmed") {
+    html += '<div class="callout unconfirmed"><b>UNCONFIRMED.</b> Launch sources have not yet verified the exact trigger for this trophy.</div>';
   }
-  const chips =
-    `<span class="pip grade-${t.grade}">${t.grade} · ${t.points} PSN pts</span>` +
-    (t.flag === 'missable' ? '<span class="pip flag-missable">Possibly missable</span>' : '') +
-    (disputes.some((d) => d.trophy === t.name) ? '<span class="pip flag-watch">Sources differ</span>' : '') +
-    (t.hidden ? '<span class="pip hidden-pip">Hidden on PSN</span>' : '') +
-    `<span class="pip">Stage ${t.stage} · ${esc(t.kind)} · Difficulty ${t.difficulty}/10 · ≈ ${t.hours} h</span>`;
-  const counterBox = t.count
-    ? `<div class="counter-box"><span class="counter-label">YOUR COUNT</span><button type="button" id="cMinus" aria-label="Decrease counter">−</button>` +
-      `<span class="cnum">${counterOf(t)} / ${t.count}</span><span>${esc(t.countLabel || '')}</span>` +
-      `<div class="cbar"><div class="cfill" style="width:${(counterOf(t) / t.count) * 100}%"></div></div>` +
-      `<button type="button" id="cPlus" aria-label="Increase counter">+</button></div>`
-    : '';
-  const steps = masked
-    ? '<p class="guide-text">Spoiler-safe mode hides this story trophy\u2019s guide until it is earned. Untick Spoiler-safe above to read it now.</p>'
-    : `<ol class="steps">${t.steps.map((s, i) =>
-        `<li><label class="step-line"><input type="checkbox" data-step="${i}" ${state.steps[`${t.id}-${i}`] ? 'checked' : ''}> <span>${citeHtml(s)}</span></label></li>`).join('')}</ol>` +
-      `<p class="step-prog">${stepsDone(t)} of ${t.steps.length} steps ticked — ticks save with your progress and travel with Export / Import.</p>`;
-  const guide = masked
-    ? '<p class="guide-text">Hidden by spoiler-safe mode.</p>'
-    : `<p class="guide-text">${citeHtml(t.guide)}</p>`;
-  $('detailPane').innerHTML =
-    `<h2>${esc(displayName(t))}</h2>` +
-    `<p class="official"><span class="official-label">OFFICIAL DESCRIPTION</span> &ldquo;${masked ? 'Description hidden until earned.' : esc(t.description)}&rdquo; <span class="cite">[1]</span></p>` +
-    `<div class="chip-row">${chips}</div>` +
-    counterBox +
-    callouts +
-    disputeBoxFor(t) +
-    `<h3>How to earn it — every step cited</h3>` + steps +
-    `<h3>Guide — in our own words</h3>` + guide +
-    `<div class="meta-grid">` +
-    `<div><span>Grade</span><b>${t.grade} · ${t.points} PSN pts</b></div>` +
-    `<div><span>Roadmap stage</span><b>${t.stage} · ${esc(stage ? stage.title.split('—')[0].trim() : '')}</b></div>` +
-    `<div><span>Kind</span><b>${esc(t.kind)}</b></div>` +
-    `<div><span>Difficulty</span><b>${t.difficulty} / 10</b></div>` +
-    `<div><span>Time estimate</span><b>≈ ${t.hours} h</b></div>` +
-    `<div><span>Region / character</span><b>${esc(t.scope)}</b></div>` +
-    `</div>` +
-    `<p class="src-line">Sources for this guide: <b>${t.sources.map((n) => `[${n}] ${esc((sourceByN.get(n) || {}).name || '')}`).join(' · ')}</b></p>` +
-    `<div class="earn-row"><button type="button" id="earnBtn" class="${isEarned(t) ? 'earned-btn' : ''}">${isEarned(t) ? 'Earned ✓ — tap to undo' : 'Mark as earned'}</button>` +
-    (t.hidden ? '<span class="pip hidden-pip">Hidden on PSN until earned</span>' : '') + `</div>`;
-  $('earnBtn').addEventListener('click', () => toggleEarned(t.id));
-  if (t.count) {
-    $('cMinus').addEventListener('click', () => bumpCounter(t, -1));
-    $('cPlus').addEventListener('click', () => bumpCounter(t, 1));
+
+  disputes.slice(0, 1).forEach((d) => {
+    html += '<div class="dispute-box"><h4>DISPUTE — ' + esc(d.topic) + '</h4>' +
+      '<div class="dispute-cols"><div><span class="side-label">VERSION A</span><p>' + cited(d.a) + '</p></div>' +
+      '<div><span class="side-label">VERSION B</span><p>' + cited(d.b) + '</p></div></div>' +
+      '<p class="dispute-call">' + cited(d.call) + '</p></div>';
+  });
+  if (disputes.length > 1) {
+    html += '<p class="spoiler-note">+' + (disputes.length - 1) + ' more dispute' +
+      (disputes.length > 2 ? 's' : '') + ' on this trophy — all ' + DATA.disputes.length +
+      ' disputes are laid out in Sources &amp; disputes.</p>';
   }
-  for (const box of $('detailPane').querySelectorAll('[data-step]')) {
-    box.addEventListener('change', () => {
-      const key = `${t.id}-${box.dataset.step}`;
-      if (box.checked) state.steps[key] = true; else delete state.steps[key];
-      saveState(state);
-      renderHeader();
-      renderList();
-      const prog = $('detailPane').querySelector('.step-prog');
-      if (prog) prog.textContent = `${stepsDone(t)} of ${t.steps.length} steps ticked — ticks save with your progress and travel with Export / Import.`;
+
+  if (progress.spoilerSafe && t.hidden) {
+    html += '<p class="spoiler-note">Guide hidden by spoiler-safe mode — turn it off above to read the route for this trophy.</p>';
+  } else {
+    html += '<h3 style="margin:9px 0 2px;font-size:16px">How to earn it — every step cited</h3>';
+    html += '<ol class="step-list">';
+    t.steps.forEach((step, i) => {
+      const key = t.id + ":" + i;
+      const done = progress.stepsDone[key] === true;
+      html += '<li class="' + (done ? "is-done" : "") + '"><span class="step-num">' + (i + 1) + '.</span>' +
+        '<input type="checkbox" data-step="' + key + '"' + (done ? " checked" : "") + '>' +
+        '<span class="step-text">' + cited(step) + '</span></li>';
     });
+    html += '</ol>';
+    html += '<h3 style="margin:16px 0 4px;font-size:16px">Guide notes</h3>';
+    html += '<p class="guide-prose">' + cited(t.guide) + '</p>';
   }
+
+  const inPlan = progress.plan.includes(t.id);
+  html += '<div class="detail-actions">' +
+    '<button class="btn" data-toggle-earned="' + t.id + '">' + (isEarned(progress, t) ? "Mark not earned" : "Mark earned") + '</button>' +
+    '<button class="btn ghost" data-plan="' + t.id + '">' + (inPlan ? "Remove from plan" : "Add to plan") + '</button></div>';
+  html += '</div>';
+  return html;
 }
 
-function bumpCounter(t, delta) {
-  const next = Math.max(0, Math.min(t.count, counterOf(t) + delta));
-  state.counters[t.id] = next;
-  if (next >= t.count && !isEarned(t)) state.earned = [...earnedSet(), t.id];
-  saveState(state);
-  renderAll();
+function railsHtml() {
+  const audit = computeAudit(DATA);
+  const upcoming = nextUp(progress, DATA.trophies, 5);
+  let html = '<div>';
+  html += '<div class="rail-card"><h3>NEXT UP · EARLIEST UNGATED</h3><ol>';
+  upcoming.forEach((t, i) => {
+    html += '<li><span class="linkish" data-select="' + t.id + '"><b>' + esc(t.name) + '</b></span>' +
+      '<span class="sub">Stage ' + t.stage + ' · ≈' + t.hours + ' h · ' + (isEarned(progress, t) ? "earned" : "ungated") + '</span></li>';
+  });
+  html += '</ol></div>';
+
+  html += '<div class="rail-card"><h3>ROADMAP ORDER</h3><ol>';
+  for (const stage of DATA.stages) {
+    const inStage = DATA.trophies.filter((t) => t.stage === stage.n);
+    const earnedInStage = inStage.filter((t) => isEarned(progress, t)).length;
+    const names = inStage.slice(0, 4).map((t) => t.name).join(" · ");
+    const more = inStage.length > 4 ? ' · +' + (inStage.length - 4) + ' more' : '';
+    html += '<li><b>Stage ' + stage.n + ' — ' + esc(stage.title.split("—")[1] ? stage.title.split("—")[1].trim() : stage.title) + '</b>' +
+      '<span class="sub">' + earnedInStage + '/' + inStage.length + ' earned</span>' +
+      '<span class="sub">' + esc(names + more) + '</span></li>';
+  }
+  html += '</ol></div>';
+
+  const plat = platinumSummary(progress, DATA.trophies, DATA.stages);
+  html += '<div class="rail-card"><h3>TIME TO PLATINUM</h3>' +
+    '<p style="margin:0;font-size:14px;line-height:1.55">About <b>' + Math.round(plat.remaining) + ' h</b> of the ≈' +
+    plat.totalHours + ' h route is still ahead (' + plat.earnedCount + ' of ' + plat.total + ' trophies earned). ' +
+    'One playthrough, no online trophies.</p></div>';
+
+  html += '<div class="rail-card"><h3>SOURCES</h3><ol class="src-list">';
+  for (const s of DATA.sources) {
+    html += '<li>' + esc(s.name) + ' — cited by ' + (audit.citedBy.get(s.n) || 0) + ' of 55</li>';
+  }
+  html += '</ol></div></div>';
+  return html;
 }
 
-function renderRail() {
-  const queue = nextUpQueue(trophies, state.earned);
-  const eta = platinumEta(stages, trophies, state.earned);
-  // The rail always names real trophies: roadmap order is structure, not
-  // story, so the spoiler shield never empties Next Up or the order list.
-  const nextItems = queue.slice(0, 5).map((item) =>
-    `<li><button type="button" class="linkish" data-goto="${item.trophy.id}">${esc(item.trophy.name)}</button> ` +
-    `<span class="src-cited">Stage ${item.trophy.stage} · ≈${item.trophy.hours} h${item.gated ? ' · gated' : ' · ungated'}</span></li>`).join('');
-  const orderItems = stages.map((stage) => {
-    const inStage = trophies.filter((t) => t.stage === stage.n && t.grade !== 'platinum');
-    const got = inStage.filter((t) => isEarned(t)).length;
-    return `<li><b>Stage ${stage.n} — ${esc(stage.title.split('—')[1] ? stage.title.split('—')[1].trim() : stage.title)}</b> <span class="src-cited">${got}/${inStage.length} earned</span>` +
-      `<span class="order-names">${inStage.slice(0, 4).map((t) => esc(t.name)).join(' · ')}${inStage.length > 4 ? ` · +${inStage.length - 4} more` : ''}</span></li>`;
-  }).join('');
-  const srcItems = sources.map((s) =>
-    `<li><span class="src-name">[${s.n}] ${esc(s.name)}</span>` +
-    `<span class="src-cited">cited by ${citedByCount(s.n)} of 55 guides · ${trophies.reduce((sum, t) => sum + claimsFor(t, s.n), 0)} claims</span></li>`).join('');
-  $('rightRail').innerHTML =
-    `<div class="rail-card"><h3>Next up · earliest ungated</h3><ol>${nextItems}</ol></div>` +
-    `<div class="rail-card"><h3>Roadmap order</h3><ol>${orderItems}</ol>` +
-    `<p class="eta-line">Time to platinum ≈ <b>${eta} h</b> left · full run ≈ 200 h <span class="cite">[5]</span> · difficulty 4/10 <span class="cite">[5]</span></p></div>` +
-    `<div class="rail-card"><h3>Sources for this guide — read ${esc(doc.readDate)}</h3><ol class="src-scroll">${srcItems}</ol></div>`;
-  for (const btn of $('rightRail').querySelectorAll('[data-goto]')) {
-    btn.addEventListener('click', () => { selectedId = Number(btn.dataset.goto); renderAll(); });
-  }
+function renderLedger() {
+  const list = DATA.trophies.filter(matchesFilters);
+  const selected = DATA.trophies.find((t) => t.id === ui.selectedId) || DATA.trophies[0];
+  const ticked = totalStepsTicked(progress, DATA.trophies);
+  const totalSteps = DATA.trophies.reduce((s, t) => s + t.steps.length, 0);
+  const earnedCount = DATA.trophies.filter((t) => isEarned(progress, t)).length;
+  appEl.innerHTML = toolbarHtml() +
+    '<p class="result-line">Showing ' + list.length + ' of ' + DATA.trophies.length + ' trophies · ' +
+    earnedCount + ' earned · ' + ticked + '/' + totalSteps + ' steps ticked · click a row for its cited guide</p>' +
+    '<div class="ledger-grid"><div>' + ledgerListHtml(list) + '</div>' +
+    '<div>' + detailHtml(selected) + '</div>' + railsHtml() + '</div>';
+  bindToolbar();
 }
+
+/* ---------------- roadmap view ---------------- */
 
 function renderRoadmap() {
-  $('roadmapIntro').innerHTML =
-    `Six stages, ≈200 hours in total, one playthrough. The launch roadmap rates the set 4/10 difficulty with a single possibly missable trophy <span class="cite">[5]</span>. ` +
-    `Per-stage hours below sum to the platinum estimate; each stage card carries its own numbered, cited action steps.`;
-  $('roadmapChips').innerHTML =
-    `<span class="sum-chip">≈200 hours total <span class="cite">[5]</span></span>` +
-    `<span class="sum-chip">Difficulty 4/10 <span class="cite">[5]</span></span>` +
-    `<span class="sum-chip">1 playthrough <span class="cite">[5]</span></span>` +
-    `<span class="sum-chip">1 possibly missable <span class="cite">[5]</span><span class="cite">[22]</span></span>` +
-    `<span class="sum-chip">8 watch <span class="cite">[4]</span></span>` +
-    `<span class="sum-chip">0 online trophies <span class="cite">[1]</span><span class="cite">[2]</span></span>` +
-    `<span class="sum-chip">0 glitched reported <span class="cite">[5]</span></span>` +
-    `<span class="sum-chip">Manual save at every chapter start <span class="cite">[5]</span></span>` +
-    `<span class="sum-chip">100% checklist uses thresholds, not totals <span class="cite">[19]</span><span class="cite">[21]</span></span>`;
-  const list = $('stageList');
-  list.replaceChildren();
-  for (const stage of stages) {
-    const inStage = trophies.filter((t) => t.stage === stage.n);
-    const got = inStage.filter((t) => isEarned(t)).length;
-    const li = document.createElement('li');
-    li.className = 'stage-card';
-    li.innerHTML =
-      `<h3>Stage ${stage.n} — ${esc(stage.title)}</h3>` +
-      `<div><b>${got}/${inStage.length} earned</b> · ≈${stage.hours} h · ${citeHtml(stage.note)}</div>` +
-      `<div class="stage-bar"><div class="stage-fill" style="width:${inStage.length ? (got / inStage.length) * 100 : 0}%"></div></div>` +
-      `<ol class="steps stage-actions">${(stage.actions || []).map((a) => `<li>${citeHtml(a)}</li>`).join('')}</ol>` +
-      `<div class="stage-names">${inStage.map((t) => esc(t.name)).join(' · ')}</div>`;
-    list.append(li);
+  const totalHours = DATA.stages.reduce((s, x) => s + x.hours, 0);
+  let cumulative = 0;
+  let html = '<h2 class="view-heading">Roadmap to the platinum</h2>' +
+    '<p class="view-intro">Six stages, ≈' + totalHours + ' hours in total, one playthrough. The launch roadmap rates the set 4/10 difficulty ' +
+    'with a single possibly missable trophy <span class="cite">[5]</span>. Per-stage hours below sum to the platinum estimate; ' +
+    'each stage card carries its own numbered, cited action steps.</p>';
+  html += '<div class="summary-chips">' +
+    '<span class="chip">≈' + totalHours + ' hours total <span class="cite">[5]</span></span>' +
+    '<span class="chip">Difficulty 4/10 <span class="cite">[5]</span></span>' +
+    '<span class="chip">1 playthrough <span class="cite">[5]</span></span>' +
+    '<span class="chip">1 possibly missable <span class="cite">[5]</span><span class="cite">[22]</span></span>' +
+    '<span class="chip">8 watch <span class="cite">[4]</span></span>' +
+    '<span class="chip">0 online trophies <span class="cite">[1]</span><span class="cite">[2]</span></span>' +
+    '<span class="chip">0 glitched reported <span class="cite">[5]</span></span>' +
+    '<span class="chip">Manual save at every chapter start <span class="cite">[5]</span></span>' +
+    '<span class="chip">100% checklist uses thresholds, not totals <span class="cite">[19]</span><span class="cite">[21]</span></span></div>';
+
+  html += '<div class="two-col"><div>';
+  for (const stage of DATA.stages) {
+    cumulative += stage.hours;
+    const inStage = DATA.trophies.filter((t) => t.stage === stage.n);
+    const earnedInStage = inStage.filter((t) => isEarned(progress, t)).length;
+    const pctStage = inStage.length ? Math.round((earnedInStage / inStage.length) * 100) : 0;
+    html += '<div class="stage-card"><h3>Stage ' + stage.n + ' — ' + esc(stage.title) + '</h3>' +
+      '<div class="stage-meta"><b>' + earnedInStage + '/' + inStage.length + ' earned</b> · ≈' + stage.hours +
+      ' h · cumulative ≈' + cumulative + ' h · ' + cited(stage.note) + '</div>' +
+      '<div class="stage-bar"><i style="width:' + pctStage + '%"></i></div><ol>' +
+      stage.actions.map((a) => '<li>' + cited(a) + '</li>').join("") +
+      '</ol><div class="stage-names">' + inStage.map((t) => esc(t.name)).join(" · ") + '</div></div>';
   }
-  const lastChance = { missable: 'Last chance: Chapter 1, before the chapter ends', watch: 'Last chance: free roam — set it up before you attempt it', unconfirmed: 'Last chance: unconfirmed — no verified window yet' };
-  const watchItems = trophies.filter((t) => t.flag !== 'none').map((t) =>
-    `<li><button type="button" class="linkish" data-goto="${t.id}">${esc(t.name)}</button> ${flagPip(t)}` +
-    `<span class="src-cited">${esc(lastChance[t.flag])} · first step: ${citeHtml(t.steps[0])}</span></li>`).join('');
-  $('missableWatch').innerHTML =
-    `<div class="rail-card"><h3>Missable watch — last-chance chapters</h3><ol>${watchItems}</ol></div>`;
-  for (const btn of $('missableWatch').querySelectorAll('[data-goto]')) {
-    btn.addEventListener('click', () => { selectedId = Number(btn.dataset.goto); switchView('ledger'); });
-  }
+  html += '</div>';
+
+  const watch = watchOrder(DATA.trophies);
+  html += '<div class="rail-card"><h3>MISSABLE WATCH — LAST-CHANCE CHAPTERS</h3><ol>';
+  watch.forEach((t, i) => {
+    const label = t.flag === "missable" ? '<span class="pill flag">Possibly Missable</span>' : '<span class="pill warn">Watch</span>';
+    const chance = t.flag === "missable" ? "Chapter 1, before the chapter ends" : "free roam — set it up before you attempt it";
+    html += '<li><span class="linkish" data-select="' + t.id + '"><b>' + esc(t.name) + '</b></span> ' + label +
+      '<span class="sub">Last chance: ' + chance + ' · first step: ' + cited(t.steps[0] || "") + '</span></li>';
+  });
+  html += '</ol></div></div>';
+  appEl.innerHTML = html;
 }
 
-function renderFlags() {
+/* ---------------- missables view ---------------- */
+
+function renderMissables() {
   const groups = [
-    ['missable', 'Possibly missable — 1', 'missable'],
-    ['watch', 'Watch — specific setups, easy to fumble — 8', 'watch'],
-    ['unconfirmed', 'Unconfirmed — trigger not yet verified by launch sources — 8', 'unconfirmed'],
+    ["missable", "Possibly missable"],
+    ["watch", "Watch — specific setups, easy to fumble"],
+    ["unconfirmed", "Unconfirmed — trigger not yet verified"],
   ];
-  const wrap = $('flagGroups');
-  wrap.replaceChildren();
-  for (const [flag, title, cls] of groups) {
-    const div = document.createElement('div');
-    div.className = 'flag-group';
-    div.innerHTML = `<h3>${title}</h3>`;
-    for (const t of trophies.filter((x) => x.flag === flag)) {
-      const card = document.createElement('div');
-      card.className = `flag-card ${cls}`;
-      card.innerHTML =
-        `<b>${esc(t.name)}</b> <span class="pip grade-${t.grade}">${t.grade}</span> <span class="pip">Stage ${t.stage}</span>` +
-        `<p>${esc(t.description)} — ${citeHtml(t.steps[0])}</p>`;
-      card.addEventListener('click', () => { selectedId = t.id; switchView('ledger'); });
-      div.append(card);
+  let html = '<h2 class="view-heading">Missables &amp; watch list</h2>' +
+    '<p class="view-intro">One trophy can be lost for a whole playthrough. Eight more are flagged WATCH — specific setups that are easy to fumble — ' +
+    'and eight are UNCONFIRMED, where launch sources have not yet verified the trigger. Everything else can be cleaned up in free roam after the story.</p>';
+  for (const [flag, label] of groups) {
+    const items = DATA.trophies.filter((t) => t.flag === flag)
+      .sort((a, b) => (a.stage - b.stage) || (a.id - b.id));
+    html += '<h3 class="section-label">' + label + ' — ' + items.length + '</h3>';
+    for (const t of items) {
+      html += '<div class="watch-item' + (flag === "missable" ? " is-missable" : "") + '">' +
+        '<h4><span class="linkish" data-select="' + t.id + '">' + esc(t.name) + '</span></h4> ' +
+        '<span class="pill grade-' + t.grade + '">' + t.grade[0].toUpperCase() + t.grade.slice(1) + '</span>' +
+        '<span class="pill">Stage ' + t.stage + '</span>' +
+        '<p>' + esc(t.description) + ' — ' + cited(t.steps[0] || "") + '</p></div>';
     }
-    wrap.append(div);
   }
+  appEl.innerHTML = html;
 }
+
+/* ---------------- planner view ---------------- */
 
 function renderPlanner() {
-  const hours = Number($('hoursSelect').value);
-  const queue = nextUpQueue(trophies, state.earned);
-  const { picks, used } = sessionPlan(queue, hours);
-  $('planSummary').textContent = picks.length
-    ? (used > hours
-      ? `Plan: start with ${picks[0].trophy.name} — it outranks the clock (≈${used} h of work, begun inside your ${hours} h).`
-      : `Plan: ${picks.length} trophies, ≈${used} h of your ${hours} h session.`)
-    : 'Everything is earned — the platinum is yours.';
-  const fill = (el, items, withWhy) => {
-    el.replaceChildren();
-    for (const item of items) {
-      const li = document.createElement('li');
-      li.innerHTML =
-        `<b>${esc(displayName(item.trophy))}</b> <span class="pip grade-${item.trophy.grade}">${item.trophy.grade}</span> ` +
-        `<span class="pip">Stage ${item.trophy.stage}</span> ${flagPip(item.trophy)}` +
-        (withWhy ? `<span class="why">${item.trophy.flag === 'missable' ? 'First because it can be lost in Chapter 1.' : item.gated ? 'Later stage — scheduled after the current stage clears.' : 'Earliest ungated trophy in roadmap order.'} ≈${item.trophy.hours} h · ${citeHtml(item.trophy.steps[0])}</span>` : '');
-      li.addEventListener('click', () => { selectedId = item.trophy.id; switchView('ledger'); });
-      el.append(li);
+  const upcoming = nextUp(progress, DATA.trophies, 10);
+  const summary = planSummary(progress, DATA.trophies);
+  let html = '<h2 class="view-heading">Next up / Planner</h2>' +
+    '<p class="view-intro">The earliest ungated trophies in roadmap order come first. Add any trophy to your plan from its detail panel ' +
+    'or the table below — plan totals update as counters and earned marks change.</p>';
+  html += '<div class="two-col"><div><h3 class="section-label">Next up — earliest ungated</h3>';
+  for (const t of upcoming) {
+    html += '<div class="watch-item"><h4><span class="linkish" data-select="' + t.id + '">' + esc(t.name) + '</span></h4> ' +
+      '<span class="pill grade-' + t.grade + '">' + t.grade[0].toUpperCase() + t.grade.slice(1) + '</span>' +
+      '<span class="pill">Stage ' + t.stage + '</span>' +
+      '<p>≈' + Math.round(hoursRemaining(progress, t) * 10) / 10 + ' h left · steps ' +
+      stepsTicked(progress, t) + '/' + t.steps.length + ' ticked</p></div>';
+  }
+  html += '</div><div><div class="rail-card"><h3>YOUR PLAN</h3>';
+  if (!summary.chosen.length) {
+    html += '<p class="empty-note">Nothing planned yet — add trophies from the ledger.</p>';
+  } else {
+    html += '<table class="plan-table"><tr><th>Trophy</th><th>Hours left</th><th></th></tr>';
+    for (const t of summary.chosen) {
+      html += '<tr><td>' + esc(t.name) + (isEarned(progress, t) ? ' ✓' : '') + '</td><td>' +
+        Math.round(hoursRemaining(progress, t) * 10) / 10 + '</td>' +
+        '<td><button class="chip-btn" data-plan="' + t.id + '">Remove</button></td></tr>';
     }
-  };
-  fill($('planList'), picks, true);
-  fill($('queueList'), queue.slice(0, 10), false);
+    html += '</table><p style="font-size:14px"><b>' + summary.open + ' open</b> · about <b>' +
+      Math.round(summary.hours) + ' h</b> of planned play remaining.</p>';
+  }
+  html += '</div>';
+  html += '<div class="rail-card"><h3>ADD TO PLAN</h3><ul style="list-style:none;padding-left:0">';
+  for (const t of roadmapSequence(DATA.trophies)) {
+    if (progress.plan.includes(t.id)) continue;
+    html += '<li><button class="chip-btn" data-plan="' + t.id + '">+ ' + esc(t.name) + '</button></li>';
+  }
+  html += '</ul></div></div></div>';
+  appEl.innerHTML = html;
 }
+
+/* ---------------- matrix view ---------------- */
 
 function renderMatrix() {
-  $('matrixIntro').textContent =
-    `Each cell is the number of claims — bracketed citations in that trophy's guide and steps — that rest on that source page. A blank cell means the page does not back that trophy. Every one of the 55 guides rests on at least two sources; ${totalClaims} claims are counted across the atlas.`;
-  const table = $('matrixTable');
-  const head = `<tr><th class="name">Trophy</th>${sources.map((s) => `<th title="${esc(s.name)}">[${s.n}]</th>`).join('')}<th>Claims</th><th>Sources</th></tr>`;
-  const rows = trophies.map((t) => {
-    const cells = sources.map((s) => {
-      const c = claimsFor(t, s.n);
-      return c ? `<td class="hit">${c}</td>` : '<td>·</td>';
-    }).join('');
-    const total = sources.reduce((sum, s) => sum + claimsFor(t, s.n), 0);
-    return `<tr><td class="name">${esc(t.name)}</td>${cells}<td><b>${total}</b></td><td>${t.sources.length}</td></tr>`;
-  }).join('');
-  table.innerHTML = head + rows;
+  let html = '<h2 class="view-heading">Source matrix — claims per trophy × source</h2>' +
+    '<p class="view-intro">Each cell is the number of claims — bracketed citations in that trophy\'s guide and steps — that rest on that source page. ' +
+    'A blank cell means the page does not back that trophy. Every one of the 55 guides rests on at least two sources; ' +
+    computeAudit(DATA).claims + ' claims are counted across the atlas.</p>';
+  html += '<div class="matrix-wrap"><table class="matrix-table"><tr><th class="trophy-name">Trophy</th>';
+  for (const s of DATA.sources) html += '<th>[' + s.n + ']</th>';
+  html += '<th>Claims</th><th>Sources</th></tr>';
+  for (const t of DATA.trophies) {
+    const perSource = new Map();
+    const texts = [t.guide, ...t.steps];
+    for (const text of texts) {
+      for (const m of String(text).matchAll(/\[(\d+)\]/g)) {
+        const n = Number(m[1]);
+        perSource.set(n, (perSource.get(n) || 0) + 1);
+      }
+    }
+    html += '<tr><td class="trophy-name">' + esc(t.name) + '</td>';
+    for (const s of DATA.sources) {
+      const v = perSource.get(s.n);
+      html += v ? '<td class="hit">' + v + '</td>' : '<td class="miss">·</td>';
+    }
+    html += '<td><b>' + trophyClaims(t) + '</b></td><td>' + t.sources.length + '</td></tr>';
+  }
+  html += '</table></div>';
+  appEl.innerHTML = html;
 }
+
+/* ---------------- sources view ---------------- */
 
 function renderSources() {
-  $('sourcesIntro').textContent =
-    `${sources.length} source pages across ${new Set(sources.map((s) => s.name.split('—')[0].trim())).size} sites, all read ${doc.readDate}. V6 lists sources per page, not per site: each numbered entry is the single page that backs the claims cited to it. Guide text is this atlas's own words; a source is cited beside the facts it supports, never copied.`;
-  const list = $('sourceList');
-  list.replaceChildren();
-  for (const s of sources) {
-    const li = document.createElement('li');
-    li.innerHTML =
-      `<b>[${s.n}] ${esc(s.name)}</b> <span class="cited-by">cited by ${citedByCount(s.n)} of 55 guides · ${trophies.reduce((sum, t) => sum + claimsFor(t, s.n), 0)} claims</span>` +
-      `<span class="what">${esc(s.what)}</span>`;
-    list.append(li);
+  const audit = computeAudit(DATA);
+  let html = '<h2 class="view-heading">Sources &amp; disputes</h2>' +
+    '<p class="view-intro">' + esc(DATA.auditNote) + '</p>' +
+    '<p class="view-intro">' + esc(DATA.disagreementNote) + '</p>';
+  html += '<h3 class="section-label">Numbered sources</h3>';
+  for (const s of DATA.sources) {
+    html += '<div class="source-entry"><span class="src-num">[' + s.n + ']</span> <a href="' + esc(s.url) +
+      '" target="_blank" rel="noopener">' + esc(s.name) + '</a> — ' + esc(s.what) +
+      ' · cited by ' + (audit.citedBy.get(s.n) || 0) + ' of 55</div>';
   }
-  const dl = $('disputeList');
-  dl.replaceChildren();
-  for (const d of disputes) {
-    const div = document.createElement('div');
-    div.className = 'dispute-box page-dispute';
-    div.innerHTML =
-      `<div class="dispute-topic">DISPUTE ${d.id} — ${esc(d.topic)} <span class="pip">${esc(d.trophy)}</span></div>` +
-      `<div class="dispute-ab"><div><b>Version A</b><p>${citeHtml(d.a)}</p></div><div><b>Version B</b><p>${citeHtml(d.b)}</p></div></div>` +
-      `<p class="dispute-call">${citeHtml(d.call)}</p>`;
-    dl.append(div);
+  html += '<h3 class="section-label">Disputes — both positions, and our call</h3>';
+  for (const d of DATA.disputes) {
+    html += '<div class="dispute-box"><h4>' + esc(d.topic) + ' (' + esc(d.trophy) + ')</h4>' +
+      '<div class="dispute-cols"><div><span class="side-label">VERSION A</span><p>' + cited(d.a) + '</p></div>' +
+      '<div><span class="side-label">VERSION B</span><p>' + cited(d.b) + '</p></div></div>' +
+      '<p class="dispute-call">' + cited(d.call) + '</p></div>';
   }
-  $('disagreeBox').innerHTML =
-    `<div class="callout disagree"><b>SOURCE DISAGREEMENT ON RECORD.</b> ${esc(doc.disagreementNote)}</div>`;
-  $('footSources').textContent = `Sources read ${doc.readDate}: ` + sources.map((s) => `[${s.n}] ${s.name}`).join(' · ');
+  appEl.innerHTML = html;
 }
 
-function renderAll() {
-  renderHeader();
-  renderAudit();
-  renderList();
-  renderDetail();
-  renderRail();
-  if (activeView === 'roadmap') renderRoadmap();
-  if (activeView === 'missables') renderFlags();
-  if (activeView === 'planner') renderPlanner();
-  if (activeView === 'matrix') renderMatrix();
-  if (activeView === 'sources') renderSources();
+/* ---------------- wiring ---------------- */
+
+function bindToolbar() {
+  const query = document.getElementById("f-query");
+  if (query) query.addEventListener("input", () => { ui.query = query.value; refreshListOnly(); });
+  const grade = document.getElementById("f-grade");
+  if (grade) grade.addEventListener("change", () => { ui.grade = grade.value; render(); });
+  const stage = document.getElementById("f-stage");
+  if (stage) stage.addEventListener("change", () => { ui.stage = stage.value; render(); });
+  const earnedOnly = document.getElementById("f-earned");
+  if (earnedOnly) earnedOnly.addEventListener("change", () => { ui.earnedOnly = earnedOnly.checked; render(); });
+  const spoiler = document.getElementById("f-spoiler");
+  if (spoiler) spoiler.addEventListener("change", () => { progress.spoilerSafe = spoiler.checked; persist(); render(); });
+  document.querySelectorAll("[data-kind]").forEach((btn) =>
+    btn.addEventListener("click", () => { ui.kind = btn.getAttribute("data-kind"); render(); }));
+  const exp = document.getElementById("btn-export");
+  if (exp) exp.addEventListener("click", () => exportProgress(progress));
+  const imp = document.getElementById("btn-import");
+  const fileInput = document.getElementById("import-file");
+  if (imp && fileInput) imp.addEventListener("click", () => fileInput.click());
+  const reset = document.getElementById("btn-reset");
+  if (reset) reset.addEventListener("click", () => {
+    progress = blankProgress();
+    progress.spoilerSafe = true;
+    persist(); render();
+  });
 }
 
-function switchView(view) {
-  activeView = view;
-  for (const btn of $('tabBar').querySelectorAll('button')) {
-    btn.classList.toggle('active', btn.dataset.view === view);
-  }
-  for (const section of document.querySelectorAll('.view')) {
-    section.hidden = section.id !== `view-${view}`;
-  }
-  $('toolbar').style.display = view === 'ledger' ? '' : 'none';
-  renderAll();
+// Search typing re-renders only the list column so the input keeps focus.
+function refreshListOnly() {
+  render();
+  const query = document.getElementById("f-query");
+  if (query) { query.focus(); query.setSelectionRange(query.value.length, query.value.length); }
 }
 
-function buildKindChips() {
-  const kinds = ['all', 'story', 'activities', 'collectibles', 'meta'];
-  const wrap = $('kindChips');
-  for (const kind of kinds) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = kind === 'all' ? 'All kinds' : kind[0].toUpperCase() + kind.slice(1);
-    if (kind === 'all') btn.className = 'active';
-    btn.addEventListener('click', () => {
-      kindFilter = kind;
-      for (const b of wrap.querySelectorAll('button')) b.classList.toggle('active', b === btn);
-      renderList();
-    });
-    wrap.append(btn);
-  }
+function bindAppEvents() {
+  appEl.addEventListener("click", (ev) => {
+    const selectBtn = ev.target.closest("[data-select]");
+    const earnedBox = ev.target.closest("[data-earned]");
+    const countBtn = ev.target.closest("[data-count]");
+    const planBtn = ev.target.closest("[data-plan]");
+    const toggleEarned = ev.target.closest("[data-toggle-earned]");
+    if (earnedBox) {
+      ev.stopPropagation();
+      const id = Number(earnedBox.getAttribute("data-earned"));
+      if (earnedBox.checked) progress.earned[id] = true; else delete progress.earned[id];
+      persist(); render();
+      return;
+    }
+    if (countBtn) {
+      const [idRaw, deltaRaw] = countBtn.getAttribute("data-count").split(":");
+      const id = Number(idRaw);
+      const trophy = DATA.trophies.find((t) => t.id === id);
+      const next = (progress.counters[id] || 0) + Number(deltaRaw);
+      progress.counters[id] = Math.max(0, Math.min(next, trophy.count));
+      persist(); render();
+      return;
+    }
+    if (planBtn) {
+      const id = Number(planBtn.getAttribute("data-plan"));
+      if (progress.plan.includes(id)) progress.plan = progress.plan.filter((x) => x !== id);
+      else progress.plan.push(id);
+      persist(); render();
+      return;
+    }
+    if (toggleEarned) {
+      const id = Number(toggleEarned.getAttribute("data-toggle-earned"));
+      if (progress.earned[id]) delete progress.earned[id]; else progress.earned[id] = true;
+      persist(); render();
+      return;
+    }
+    if (selectBtn) {
+      ui.selectedId = Number(selectBtn.getAttribute("data-select"));
+      ui.view = "ledger";
+      syncTabs();
+      render();
+      window.scrollTo({ top: 0 });
+    }
+  });
+  appEl.addEventListener("change", (ev) => {
+    const stepBox = ev.target.closest("[data-step]");
+    if (stepBox) {
+      const key = stepBox.getAttribute("data-step");
+      if (stepBox.checked) progress.stepsDone[key] = true; else delete progress.stepsDone[key];
+      persist(); render();
+    }
+  });
 }
 
-buildKindChips();
-$('spoilerToggle').checked = state.spoilerSafe;
-$('spoilerToggle').addEventListener('change', () => { state.spoilerSafe = $('spoilerToggle').checked; saveState(state); renderAll(); });
-$('searchBox').addEventListener('input', renderList);
-$('gradeSelect').addEventListener('change', renderList);
-$('stageSelect').addEventListener('change', renderList);
-$('earnedOnly').addEventListener('change', renderList);
-$('hoursSelect').addEventListener('change', renderPlanner);
-$('exportBtn').addEventListener('click', () => exportState(state));
-$('importBtn').addEventListener('click', () => $('importFile').click());
-$('importFile').addEventListener('change', async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
-  try {
-    state = parseImported(await file.text());
-    saveState(state);
-    $('spoilerToggle').checked = state.spoilerSafe;
-    renderAll();
-  } catch { /* a bad file changes nothing */ }
-});
-$('resetBtn').addEventListener('click', () => { state = emptyState(); saveState(state); $('spoilerToggle').checked = true; renderAll(); });
-for (const btn of $('tabBar').querySelectorAll('button')) {
-  btn.addEventListener('click', () => switchView(btn.dataset.view));
+function syncTabs() {
+  document.querySelectorAll("#view-tabs .tab").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.getAttribute("data-view") === ui.view);
+  });
 }
-switchView(activeView);
+
+function render() {
+  renderMasthead();
+  renderAuditStrip();
+  if (ui.view === "ledger") renderLedger();
+  else if (ui.view === "roadmap") renderRoadmap();
+  else if (ui.view === "missables") renderMissables();
+  else if (ui.view === "planner") renderPlanner();
+  else if (ui.view === "matrix") renderMatrix();
+  else if (ui.view === "sources") renderSources();
+}
+
+async function boot() {
+  const params = new URLSearchParams(location.search);
+  const wanted = params.get("view");
+  if (["ledger", "roadmap", "missables", "planner", "matrix", "sources"].includes(wanted)) ui.view = wanted;
+  const response = await fetch("data/trophies.json");
+  DATA = await response.json();
+  document.querySelectorAll("#view-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => { ui.view = tab.getAttribute("data-view"); syncTabs(); render(); });
+  });
+  const fileInput = document.getElementById("import-file");
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    importProgress(file, (merged) => { progress = merged; persist(); render(); },
+      () => alert("That file could not be read as a Leonida Atlas progress export."));
+    fileInput.value = "";
+  });
+  bindAppEvents();
+  syncTabs();
+  render();
+}
+
+boot();
